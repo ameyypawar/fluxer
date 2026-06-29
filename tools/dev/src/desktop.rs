@@ -13,8 +13,13 @@ use url::Url;
 
 const CANARY_APP_NAME: &str = "Fluxer Canary";
 const CANARY_BUNDLE_ID: &str = "app.fluxer.canary";
+const DEV_CANARY_APP_NAME: &str = "Fluxer Canary (Dev)";
+const DEV_CANARY_BUNDLE_ID: &str = "app.fluxer.canary.dev";
 const CANARY_RPC_PORT: u16 = 21864;
-const MACOS_DEV_ELECTRON_USAGE_DESCRIPTIONS: &[(&str, &str)] = &[
+const MACOS_DEV_ELECTRON_PLIST_STRINGS: &[(&str, &str)] = &[
+    ("CFBundleName", DEV_CANARY_APP_NAME),
+    ("CFBundleDisplayName", DEV_CANARY_APP_NAME),
+    ("CFBundleIdentifier", DEV_CANARY_BUNDLE_ID),
     (
         "NSMicrophoneUsageDescription",
         "Fluxer needs access to your microphone to enable voice chat features.",
@@ -49,7 +54,8 @@ pub fn install_desktop() -> Result<()> {
             ..RunOptions::default()
         },
     )
-    .map(drop)
+    .map(drop)?;
+    patch_macos_dev_electron_info_plist()
 }
 
 pub fn build_desktop(skip_native: bool) -> Result<()> {
@@ -215,7 +221,7 @@ pub async fn run_desktop_canary(
     if build {
         build_desktop(false)?;
     }
-    println!("Starting {CANARY_APP_NAME} against {app_url}");
+    println!("Starting {DEV_CANARY_APP_NAME} against {app_url}");
     run_desktop_process(&app_url, extra_args)
 }
 
@@ -255,23 +261,18 @@ fn patch_macos_dev_electron_info_plist() -> Result<()> {
     if !cfg!(target_os = "macos") || Path::new("/.dockerenv").exists() {
         return Ok(());
     }
+    ensure_macos_dev_electron_bundle()?;
     let app_bundle = dev_electron_app_bundle_path();
     let info_plist = dev_electron_info_plist_path();
-    if !info_plist.is_file() {
-        bail!(
-            "missing dev Electron Info.plist at {}; run `pnpm dev:desktop:install` first",
-            info_plist.display()
-        );
-    }
 
     let mut changed = false;
-    for (key, value) in MACOS_DEV_ELECTRON_USAGE_DESCRIPTIONS {
+    for (key, value) in MACOS_DEV_ELECTRON_PLIST_STRINGS {
         changed |= set_or_add_plist_string(&info_plist, key, value)?;
     }
 
     if changed {
         println!(
-            "Patched dev Electron Info.plist for macOS capture permissions: {}",
+            "Patched dev Electron Info.plist for macOS dev identity and capture permissions: {}",
             info_plist.display()
         );
     }
@@ -281,8 +282,111 @@ fn patch_macos_dev_electron_info_plist() -> Result<()> {
     Ok(())
 }
 
+fn ensure_macos_dev_electron_bundle() -> Result<()> {
+    if !cfg!(target_os = "macos") || Path::new("/.dockerenv").exists() {
+        return Ok(());
+    }
+    if dev_electron_bundle_is_valid() {
+        return Ok(());
+    }
+    let install_script = dev_electron_install_script_path();
+    if !install_script.is_file() {
+        bail!(
+            "missing Electron install script at {}; run `pnpm dev:desktop:install` first",
+            install_script.display()
+        );
+    }
+
+    println!("Installing dev Electron.app for macOS...");
+    install_macos_dev_electron_bundle(false)?;
+    if dev_electron_bundle_is_valid() {
+        return Ok(());
+    }
+
+    println!("Retrying dev Electron.app install without Electron download cache...");
+    install_macos_dev_electron_bundle(true)?;
+    if dev_electron_bundle_is_valid() {
+        return Ok(());
+    }
+    bail!(
+        "Electron install completed without creating a valid macOS app bundle; expected {}, {}, and {}",
+        dev_electron_info_plist_path().display(),
+        dev_electron_binary_path().display(),
+        dev_electron_framework_versions_path().display()
+    )
+}
+
+fn install_macos_dev_electron_bundle(force_no_cache: bool) -> Result<()> {
+    reset_incomplete_dev_electron_dist()?;
+    let mut env: Vec<_> = PNPM_INSTALL_ENV
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), Some((*value).to_owned())))
+        .collect();
+    env.extend([
+        ("ELECTRON_OVERRIDE_DIST_PATH".to_owned(), None),
+        ("ELECTRON_SKIP_BINARY_DOWNLOAD".to_owned(), None),
+        ("npm_config_arch".to_owned(), None),
+        ("npm_config_platform".to_owned(), None),
+    ]);
+    if force_no_cache {
+        env.push(("force_no_cache".to_owned(), Some("true".to_owned())));
+    } else {
+        env.push(("force_no_cache".to_owned(), None));
+    }
+    run_command(
+        &["node", "node_modules/electron/install.js"],
+        RunOptions {
+            cwd: DESKTOP_DIR.as_path(),
+            env,
+            ..RunOptions::default()
+        },
+    )
+    .map(drop)
+}
+
+fn reset_incomplete_dev_electron_dist() -> Result<()> {
+    let dist = dev_electron_dist_path();
+    let metadata = match std::fs::symlink_metadata(&dist) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", dist.display()));
+        }
+    };
+    if metadata.is_dir() {
+        std::fs::remove_dir_all(&dist)
+            .with_context(|| format!("failed to remove incomplete {}", dist.display()))
+    } else {
+        std::fs::remove_file(&dist)
+            .with_context(|| format!("failed to remove incomplete {}", dist.display()))
+    }
+}
+
+fn dev_electron_bundle_is_complete() -> bool {
+    dev_electron_info_plist_path().is_file() && dev_electron_binary_path().is_file()
+}
+
+fn dev_electron_bundle_is_valid() -> bool {
+    dev_electron_bundle_is_complete()
+        && path_is_symlink(&dev_electron_framework_versions_path())
+        && path_is_symlink(&dev_electron_framework_link_path("Electron Framework"))
+        && path_is_symlink(&dev_electron_framework_link_path("Helpers"))
+        && path_is_symlink(&dev_electron_framework_link_path("Libraries"))
+        && path_is_symlink(&dev_electron_framework_link_path("Resources"))
+}
+
+fn path_is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
 fn dev_electron_app_bundle_path() -> PathBuf {
-    DESKTOP_DIR.join("node_modules/electron/dist/Electron.app")
+    dev_electron_dist_path().join("Electron.app")
+}
+
+fn dev_electron_dist_path() -> PathBuf {
+    DESKTOP_DIR.join("node_modules/electron/dist")
 }
 
 fn dev_electron_info_plist_path() -> PathBuf {
@@ -291,6 +395,22 @@ fn dev_electron_info_plist_path() -> PathBuf {
 
 fn dev_electron_binary_path() -> PathBuf {
     dev_electron_app_bundle_path().join("Contents/MacOS/Electron")
+}
+
+fn dev_electron_install_script_path() -> PathBuf {
+    DESKTOP_DIR.join("node_modules/electron/install.js")
+}
+
+fn dev_electron_framework_versions_path() -> PathBuf {
+    dev_electron_framework_path().join("Versions/Current")
+}
+
+fn dev_electron_framework_link_path(name: &str) -> PathBuf {
+    dev_electron_framework_path().join(name)
+}
+
+fn dev_electron_framework_path() -> PathBuf {
+    dev_electron_app_bundle_path().join("Contents/Frameworks/Electron Framework.framework")
 }
 
 fn set_or_add_plist_string(info_plist: &Path, key: &str, value: &str) -> Result<bool> {
@@ -446,22 +566,23 @@ async fn public_app_url_is_reachable(raw: &str) -> bool {
 }
 
 fn stop_running_canary_on_host() -> Result<()> {
-    println!("Stopping any running {CANARY_APP_NAME} instance...");
-    run_best_effort(
-        "osascript",
-        &[
-            "-e",
-            &format!("tell application id \"{CANARY_BUNDLE_ID}\" to quit"),
-        ],
-    );
-    run_best_effort(
-        "osascript",
-        &[
-            "-e",
-            &format!("tell application \"{CANARY_APP_NAME}\" to quit"),
-        ],
-    );
-    run_best_effort("pkill", &["-TERM", "-x", CANARY_APP_NAME]);
+    println!("Stopping any running {CANARY_APP_NAME} or {DEV_CANARY_APP_NAME} instance...");
+    for bundle_id in [DEV_CANARY_BUNDLE_ID, CANARY_BUNDLE_ID] {
+        run_best_effort(
+            "osascript",
+            &[
+                "-e",
+                &format!("tell application id \"{bundle_id}\" to quit"),
+            ],
+        );
+    }
+    for app_name in [DEV_CANARY_APP_NAME, CANARY_APP_NAME] {
+        run_best_effort(
+            "osascript",
+            &["-e", &format!("tell application \"{app_name}\" to quit")],
+        );
+        run_best_effort("pkill", &["-TERM", "-x", app_name]);
+    }
     terminate_rpc_port_processes(CANARY_RPC_PORT)?;
     Ok(())
 }
@@ -591,9 +712,42 @@ mod tests {
     }
 
     #[test]
+    fn dev_electron_install_script_path_points_to_electron_package() {
+        assert!(
+            dev_electron_install_script_path()
+                .ends_with("fluxer_desktop/node_modules/electron/install.js")
+        );
+    }
+
+    #[test]
+    fn dev_electron_dist_path_points_to_electron_package_dist() {
+        assert!(dev_electron_dist_path().ends_with("fluxer_desktop/node_modules/electron/dist"));
+    }
+
+    #[test]
+    fn dev_electron_framework_versions_path_points_inside_electron_framework() {
+        assert!(dev_electron_framework_versions_path().ends_with(
+            "fluxer_desktop/node_modules/electron/dist/Electron.app/Contents/Frameworks/Electron Framework.framework/Versions/Current"
+        ));
+    }
+
+    #[test]
+    fn macos_dev_electron_plist_strings_include_dev_identity() {
+        assert!(MACOS_DEV_ELECTRON_PLIST_STRINGS.contains(&("CFBundleName", DEV_CANARY_APP_NAME)));
+        assert!(
+            MACOS_DEV_ELECTRON_PLIST_STRINGS
+                .contains(&("CFBundleDisplayName", DEV_CANARY_APP_NAME))
+        );
+        assert!(
+            MACOS_DEV_ELECTRON_PLIST_STRINGS
+                .contains(&("CFBundleIdentifier", DEV_CANARY_BUNDLE_ID))
+        );
+    }
+
+    #[test]
     fn dev_electron_usage_descriptions_include_audio_capture() {
         assert!(
-            MACOS_DEV_ELECTRON_USAGE_DESCRIPTIONS
+            MACOS_DEV_ELECTRON_PLIST_STRINGS
                 .iter()
                 .any(|(key, _)| *key == "NSAudioCaptureUsageDescription")
         );
