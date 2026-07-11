@@ -206,6 +206,22 @@ export const THREADS_BY_GUILD_COLUMNS = [
 	'parent_id',
 	'archived',
 ] as const satisfies ReadonlyArray<keyof ThreadsByGuildRow>;
+
+export interface ThreadArchiveDueRow {
+	due_bucket: number;
+	archive_due_at: Date;
+	thread_id: ChannelID;
+	guild_id: GuildID;
+	parent_id: Nullish<ChannelID>;
+}
+
+export const THREAD_ARCHIVE_DUE_COLUMNS = [
+	'due_bucket',
+	'archive_due_at',
+	'thread_id',
+	'guild_id',
+	'parent_id',
+] as const satisfies ReadonlyArray<keyof ThreadArchiveDueRow>;
 export const INVITE_COLUMNS = [
 	'code',
 	'type',
