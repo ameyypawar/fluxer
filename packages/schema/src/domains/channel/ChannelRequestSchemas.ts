@@ -234,7 +234,7 @@ const ChannelUpdateGroupDmRequest = z.object({
 	nicks: ChannelNicknameOverrides.nullish().describe('Custom nicknames for users in this group DM'),
 });
 
-const ChannelUpdateThreadRequest = z.object({
+const ChannelUpdateThreadRequest = ChannelUpdateCommon.extend({
 	type: createNamedLiteral(ChannelTypes.GUILD_THREAD, 'GUILD_THREAD', 'Channel type (thread)'),
 	name: GeneralChannelNameType.nullish().describe('The name of the thread'),
 	archived: z.boolean().optional().describe('Whether the thread is archived'),
@@ -245,13 +245,6 @@ const ChannelUpdateThreadRequest = z.object({
 	auto_archive_duration: ThreadAutoArchiveDurationSchema.optional().describe(
 		'Duration in minutes of inactivity after which the thread is automatically archived',
 	),
-	rate_limit_per_user: z
-		.number()
-		.int()
-		.min(CHANNEL_RATE_LIMIT_PER_USER_MIN)
-		.max(CHANNEL_RATE_LIMIT_PER_USER_MAX)
-		.nullish()
-		.describe(`Slowmode delay in seconds (${CHANNEL_RATE_LIMIT_PER_USER_MIN}-${CHANNEL_RATE_LIMIT_PER_USER_MAX})`),
 });
 
 export const ChannelUpdateRequest = z.discriminatedUnion('type', [
