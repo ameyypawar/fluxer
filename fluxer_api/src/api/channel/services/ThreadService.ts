@@ -13,12 +13,11 @@ import {MaxActiveThreadsError} from '@fluxer/errors/src/domains/channel/MaxActiv
 import {ThreadAlreadyCreatedError} from '@fluxer/errors/src/domains/channel/ThreadAlreadyCreatedError';
 import {ThreadArchivedError} from '@fluxer/errors/src/domains/channel/ThreadArchivedError';
 import {ThreadLockedError} from '@fluxer/errors/src/domains/channel/ThreadLockedError';
-import {UnknownChannelError} from '@fluxer/errors/src/domains/channel/UnknownChannelError';
 import {UnknownMessageError} from '@fluxer/errors/src/domains/channel/UnknownMessageError';
 import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
 import type {ThreadCreateRequest} from '@fluxer/schema/src/domains/channel/ChannelRequestSchemas';
 import type {ChannelResponse, ThreadMemberResponse} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
-import type {ChannelID, GuildID, MessageID, UserID} from '../../BrandedTypes';
+import type {ChannelID, MessageID, UserID} from '../../BrandedTypes';
 import {createChannelID, createMessageID} from '../../BrandedTypes';
 import type {GatewayDispatchEvent} from '../../constants/Gateway';
 import type {ThreadMemberRow, ThreadMetadata} from '../../database/types/ChannelTypes';
@@ -94,7 +93,7 @@ export class ThreadService {
 	}): Promise<ChannelResponse> {
 		const message = await this.channelRepository.messages.getMessage(params.channelId, params.messageId);
 		if (!message) throw new UnknownMessageError();
-		const threadId = createChannelID(params.messageId.toString());
+		const threadId = createChannelID(BigInt(params.messageId));
 		const existing = await this.channelRepository.channelData.findUnique(threadId);
 		if (existing && isThreadChannelType(existing.type)) {
 			throw new ThreadAlreadyCreatedError();
@@ -120,7 +119,11 @@ export class ThreadService {
 		data: ThreadCreateRequest;
 		requestCache: RequestCache;
 	}): Promise<ChannelResponse> {
-		const {channel: parent, guild, checkPermission} = await this.auth.getChannelAuthenticated({
+		const {
+			channel: parent,
+			guild,
+			checkPermission,
+		} = await this.auth.getChannelAuthenticated({
 			userId: params.userId,
 			channelId: params.channelId,
 		});
@@ -181,7 +184,7 @@ export class ThreadService {
 		await this.scheduleArchiveDue(thread, now, autoArchiveDuration);
 		if (params.starterMessageId) {
 			const starterMessage = await this.messagePersistenceService.createSystemMessage({
-				messageId: createMessageID(params.starterMessageId.toString()),
+				messageId: createMessageID(BigInt(params.starterMessageId)),
 				channelId: thread.id,
 				userId: params.userId,
 				type: MessageTypes.THREAD_STARTER_MESSAGE,
@@ -219,7 +222,7 @@ export class ThreadService {
 		data: ThreadUpdateData;
 		requestCache: RequestCache;
 	}): Promise<ChannelResponse> {
-		const {channel: thread, checkPermission, hasPermission} = await this.auth.getChannelAuthenticated({
+		const {channel: thread, hasPermission} = await this.auth.getChannelAuthenticated({
 			userId: params.userId,
 			channelId: params.threadId,
 		});
@@ -271,7 +274,7 @@ export class ThreadService {
 			row.rate_limit_per_user = params.data.rate_limit_per_user ?? 0;
 		}
 		row.thread_metadata = nextMetadata;
-		const updated = await this.channelRepository.channelData.upsert(row, thread.toRow());
+		const updated = await this.channelRepository.channelData.upsert(row);
 		if (wantsArchive || wantsUnarchive) {
 			await this.channelRepository.threads.setThreadArchivedRefs(updated, nextMetadata.archived);
 		}
@@ -543,7 +546,7 @@ export class ThreadService {
 			row.thread_metadata = {...metadata, archived: false, archive_timestamp: now};
 			unarchived = true;
 		}
-		const updated = await this.channelRepository.channelData.upsert(row, thread.toRow());
+		const updated = await this.channelRepository.channelData.upsert(row);
 		if (unarchived) {
 			await this.channelRepository.threads.setThreadArchivedRefs(updated, false);
 		}
@@ -579,7 +582,7 @@ export class ThreadService {
 		const now = new Date();
 		const row = thread.toRow();
 		row.thread_metadata = {...metadata, archived: true, archive_timestamp: now};
-		const updated = await this.channelRepository.channelData.upsert(row, thread.toRow());
+		const updated = await this.channelRepository.channelData.upsert(row);
 		await this.channelRepository.threads.setThreadArchivedRefs(updated, true);
 		const response = await this.mapThreadResponse(updated, null, null, null);
 		await this.dispatchThreadEvent(updated, 'THREAD_UPDATE', response);
@@ -604,7 +607,7 @@ export class ThreadService {
 		if (next === current) return;
 		const row = thread.toRow();
 		row.member_count = next;
-		await this.channelRepository.channelData.upsert(row, thread.toRow());
+		await this.channelRepository.channelData.upsert(row);
 	}
 
 	private async buildThreadListResult(
