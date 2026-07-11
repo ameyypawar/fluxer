@@ -9444,6 +9444,33 @@
 			],
 			"primary_key": "((guild_id), thread_id)",
 			"options": ""
+		},
+		{
+			"name": "thread_archive_due",
+			"columns": [
+				{
+					"name": "due_bucket",
+					"type": "int"
+				},
+				{
+					"name": "archive_due_at",
+					"type": "timestamp"
+				},
+				{
+					"name": "thread_id",
+					"type": "bigint"
+				},
+				{
+					"name": "guild_id",
+					"type": "bigint"
+				},
+				{
+					"name": "parent_id",
+					"type": "bigint"
+				}
+			],
+			"primary_key": "((due_bucket), archive_due_at, thread_id)",
+			"options": ""
 		}
 	],
 	"indexes": [

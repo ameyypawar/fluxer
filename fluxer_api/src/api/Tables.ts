@@ -143,10 +143,12 @@ import {
 	type InviteRow,
 	PRIVATE_CHANNEL_COLUMNS,
 	type PrivateChannelRow,
+	THREAD_ARCHIVE_DUE_COLUMNS,
 	THREAD_MEMBER_COLUMNS,
 	THREAD_MEMBERS_BY_USER_COLUMNS,
 	THREADS_BY_GUILD_COLUMNS,
 	THREADS_BY_PARENT_COLUMNS,
+	type ThreadArchiveDueRow,
 	type ThreadMemberRow,
 	type ThreadMembersByUserRow,
 	type ThreadsByGuildRow,
@@ -611,6 +613,17 @@ export const ThreadsByGuild = defineTable<ThreadsByGuildRow, 'guild_id' | 'threa
 	columns: THREADS_BY_GUILD_COLUMNS,
 	primaryKey: ['guild_id', 'thread_id'],
 	partitionKey: ['guild_id'],
+});
+
+export const ThreadArchiveDue = defineTable<
+	ThreadArchiveDueRow,
+	'due_bucket' | 'archive_due_at' | 'thread_id',
+	'due_bucket'
+>({
+	name: 'thread_archive_due',
+	columns: THREAD_ARCHIVE_DUE_COLUMNS,
+	primaryKey: ['due_bucket', 'archive_due_at', 'thread_id'],
+	partitionKey: ['due_bucket'],
 });
 export const ChannelState = defineTable<ChannelStateRow, 'channel_id'>({
 	name: 'channel_state',
