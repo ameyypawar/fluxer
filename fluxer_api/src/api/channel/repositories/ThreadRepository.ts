@@ -11,7 +11,14 @@ import type {
 	ThreadsByParentRow,
 } from '../../database/types/ChannelTypes';
 import {Channel} from '../../models/Channel';
-import {ThreadArchiveDue, ThreadMembers, ThreadMembersByUser, Threads, ThreadsByGuild, ThreadsByParent} from './ThreadTables';
+import {
+	Channels,
+	ThreadArchiveDue,
+	ThreadMembers,
+	ThreadMembersByUser,
+	ThreadsByGuild,
+	ThreadsByParent,
+} from '../../Tables';
 import {IThreadRepository} from './IThreadRepository';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -49,7 +56,7 @@ export class ThreadRepository extends IThreadRepository {
 			throw new Error('Thread rows require guild_id and parent_id');
 		}
 		const batch = new BatchBuilder();
-		batch.addPrepared(Threads.insert(row));
+		batch.addPrepared(Channels.insert(row));
 		batch.addPrepared(
 			ThreadsByParent.insert({
 				parent_id: row.parent_id,
@@ -81,10 +88,7 @@ export class ThreadRepository extends IThreadRepository {
 		if (!thread.guildId || !thread.parentId) return;
 		const batch = new BatchBuilder();
 		batch.addPrepared(
-			ThreadsByParent.patchByPk(
-				{parent_id: thread.parentId, thread_id: thread.id},
-				{archived: Db.set(archived)},
-			),
+			ThreadsByParent.patchByPk({parent_id: thread.parentId, thread_id: thread.id}, {archived: Db.set(archived)}),
 		);
 		batch.addPrepared(
 			ThreadsByGuild.patchByPk({guild_id: thread.guildId, thread_id: thread.id}, {archived: Db.set(archived)}),
@@ -148,7 +152,7 @@ export class ThreadRepository extends IThreadRepository {
 	async deleteThread(thread: Channel): Promise<void> {
 		const members = await this.listThreadMembers(thread.id);
 		const batch = new BatchBuilder();
-		batch.addPrepared(Threads.deleteByPk({channel_id: thread.id, soft_deleted: false}));
+		batch.addPrepared(Channels.deleteByPk({channel_id: thread.id, soft_deleted: false}));
 		if (thread.parentId) {
 			batch.addPrepared(ThreadsByParent.deleteByPk({parent_id: thread.parentId, thread_id: thread.id}));
 		}
