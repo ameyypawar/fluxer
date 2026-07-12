@@ -30,8 +30,8 @@ import {deleteChannelMessageSearchDocuments} from '../../search/MessageSearchInd
 import {mapChannelToResponse} from '../ChannelMappers';
 import type {IChannelRepositoryAggregate} from '../repositories/IChannelRepositoryAggregate';
 import {getThreadArchiveDueBucket} from '../repositories/ThreadRepository';
-import type {ChannelAuthService} from './channel_data/ChannelAuthService';
 import {dispatchChannelEvent} from './ChannelGatewayDispatch';
+import type {ChannelAuthService} from './channel_data/ChannelAuthService';
 import {dispatchMessageCreateBroadcast} from './message/MessageGatewayDispatch';
 import type {MessagePersistenceService} from './message/MessagePersistenceService';
 

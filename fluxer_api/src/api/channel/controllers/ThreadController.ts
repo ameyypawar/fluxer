@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import {ThreadCreateRequest, ThreadListArchivedQuery, ThreadSearchQuery} from '@fluxer/schema/src/domains/channel/ChannelRequestSchemas';
-import {ChannelResponse, ThreadListResponse, ThreadMemberResponse} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
+import {
+	ThreadCreateRequest,
+	ThreadListArchivedQuery,
+	ThreadSearchQuery,
+} from '@fluxer/schema/src/domains/channel/ChannelRequestSchemas';
+import {
+	ChannelResponse,
+	ThreadListResponse,
+	ThreadMemberResponse,
+} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
 import {
 	ChannelIdMessageIdParam,
 	ChannelIdParam,
