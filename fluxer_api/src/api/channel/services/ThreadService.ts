@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
+import {AuditLogActionType} from '@fluxer/constants/src/AuditLogActionType';
 import {
 	ChannelTypes,
 	isThreadChannelType,
@@ -14,24 +15,30 @@ import {ThreadAlreadyCreatedError} from '@fluxer/errors/src/domains/channel/Thre
 import {ThreadArchivedError} from '@fluxer/errors/src/domains/channel/ThreadArchivedError';
 import {ThreadLockedError} from '@fluxer/errors/src/domains/channel/ThreadLockedError';
 import {UnknownMessageError} from '@fluxer/errors/src/domains/channel/UnknownMessageError';
+import {MissingAccessError} from '@fluxer/errors/src/domains/core/MissingAccessError';
 import {MissingPermissionsError} from '@fluxer/errors/src/domains/core/MissingPermissionsError';
 import type {ThreadCreateRequest} from '@fluxer/schema/src/domains/channel/ChannelRequestSchemas';
 import type {ChannelResponse, ThreadMemberResponse} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
-import type {ChannelID, MessageID, UserID} from '../../BrandedTypes';
+import type {ChannelID, GuildID, MessageID, UserID} from '../../BrandedTypes';
 import {createChannelID, createMessageID} from '../../BrandedTypes';
 import type {GatewayDispatchEvent} from '../../constants/Gateway';
 import type {ThreadMemberRow, ThreadMetadata} from '../../database/types/ChannelTypes';
+import type {GuildAuditLogService} from '../../guild/GuildAuditLogService';
+import {ChannelHelpers} from '../../guild/services/channel/ChannelHelpers';
 import type {IGatewayService} from '../../infrastructure/IGatewayService';
 import type {ISnowflakeService} from '../../infrastructure/ISnowflakeService';
 import type {UserCacheService} from '../../infrastructure/UserCacheService';
-import type {RequestCache} from '../../middleware/RequestCacheMiddleware';
-import type {Channel} from '../../models/Channel';
+import {Logger} from '../../Logger';
+import {createRequestCache, type RequestCache} from '../../middleware/RequestCacheMiddleware';
+import {Channel} from '../../models/Channel';
 import {deleteChannelMessageSearchDocuments} from '../../search/MessageSearchIndexCleanup';
 import {mapChannelToResponse} from '../ChannelMappers';
 import type {IChannelRepositoryAggregate} from '../repositories/IChannelRepositoryAggregate';
 import {getThreadArchiveDueBucket} from '../repositories/ThreadRepository';
+import type {AuthenticatedChannel} from './AuthenticatedChannel';
 import {dispatchChannelEvent} from './ChannelGatewayDispatch';
 import type {ChannelAuthService} from './channel_data/ChannelAuthService';
+import type {ChannelUtilsService} from './channel_data/ChannelUtilsService';
 import {dispatchMessageCreateBroadcast} from './message/MessageGatewayDispatch';
 import type {MessagePersistenceService} from './message/MessagePersistenceService';
 
@@ -82,6 +89,8 @@ export class ThreadService {
 		private readonly gatewayService: IGatewayService,
 		private readonly snowflakeService: ISnowflakeService,
 		private readonly messagePersistenceService: MessagePersistenceService,
+		private readonly channelUtilsService: ChannelUtilsService,
+		private readonly guildAuditLogService: GuildAuditLogService,
 	) {}
 
 	async createThreadFromMessage(params: {
@@ -91,6 +100,7 @@ export class ThreadService {
 		data: ThreadCreateRequest;
 		requestCache: RequestCache;
 	}): Promise<ChannelResponse> {
+		const parentAuth = await this.authenticateThreadParent(params.userId, params.channelId);
 		const message = await this.channelRepository.messages.getMessage(params.channelId, params.messageId);
 		if (!message) throw new UnknownMessageError();
 		const threadId = createChannelID(BigInt(params.messageId));
@@ -98,7 +108,7 @@ export class ThreadService {
 		if (existing && isThreadChannelType(existing.type)) {
 			throw new ThreadAlreadyCreatedError();
 		}
-		return this.createThreadInternal({...params, threadId, starterMessageId: params.messageId});
+		return this.createThreadInternal({...params, parentAuth, threadId, starterMessageId: params.messageId});
 	}
 
 	async createThread(params: {
@@ -107,30 +117,34 @@ export class ThreadService {
 		data: ThreadCreateRequest;
 		requestCache: RequestCache;
 	}): Promise<ChannelResponse> {
+		const parentAuth = await this.authenticateThreadParent(params.userId, params.channelId);
 		const threadId = createChannelID(await this.snowflakeService.generateForChannel(params.channelId));
-		return this.createThreadInternal({...params, threadId, starterMessageId: null});
+		return this.createThreadInternal({...params, parentAuth, threadId, starterMessageId: null});
+	}
+
+	/** Authenticates the parent channel before any message or thread lookups leak existence. */
+	private async authenticateThreadParent(userId: UserID, channelId: ChannelID): Promise<AuthenticatedChannel> {
+		const parentAuth = await this.auth.getChannelAuthenticated({userId, channelId});
+		if (!parentAuth.channel.guildId || !parentAuth.guild || parentAuth.channel.type !== ChannelTypes.GUILD_TEXT) {
+			throw new InvalidChannelTypeError();
+		}
+		await parentAuth.checkPermission(Permissions.CREATE_PUBLIC_THREADS);
+		return parentAuth;
 	}
 
 	private async createThreadInternal(params: {
 		userId: UserID;
 		channelId: ChannelID;
+		parentAuth: AuthenticatedChannel;
 		threadId: ChannelID;
 		starterMessageId: MessageID | null;
 		data: ThreadCreateRequest;
 		requestCache: RequestCache;
 	}): Promise<ChannelResponse> {
-		const {
-			channel: parent,
-			guild,
-			checkPermission,
-		} = await this.auth.getChannelAuthenticated({
-			userId: params.userId,
-			channelId: params.channelId,
-		});
-		if (!parent.guildId || !guild || parent.type !== ChannelTypes.GUILD_TEXT) {
+		const parent = params.parentAuth.channel;
+		if (!parent.guildId) {
 			throw new InvalidChannelTypeError();
 		}
-		await checkPermission(Permissions.CREATE_PUBLIC_THREADS);
 		const guildRefs = await this.channelRepository.threads.listThreadRefsByGuild(parent.guildId);
 		const activeCount = guildRefs.filter((ref) => !ref.archived).length;
 		if (activeCount >= MAX_ACTIVE_THREADS_PER_GUILD) {
@@ -182,6 +196,11 @@ export class ThreadService {
 			joinTimestamp: now,
 		});
 		await this.scheduleArchiveDue(thread, now, autoArchiveDuration);
+		// Dispatch THREAD_CREATE before any messages inside the thread so the
+		// gateway indexes the thread and can permission-scope those messages.
+		const member = await this.channelRepository.threads.getThreadMember(thread.id, params.userId);
+		const response = await this.mapThreadResponse(thread, params.userId, params.requestCache, member);
+		await this.dispatchThreadEvent(thread, 'THREAD_CREATE', {...response, newly_created: true});
 		if (params.starterMessageId) {
 			const starterMessage = await this.messagePersistenceService.createSystemMessage({
 				messageId: createMessageID(BigInt(params.starterMessageId)),
@@ -204,15 +223,18 @@ export class ThreadService {
 			type: MessageTypes.THREAD_CREATED,
 			content: params.data.name,
 			guildId: parent.guildId,
+			messageReference: {
+				channel_id: thread.id,
+				message_id: createMessageID(BigInt(thread.id)),
+				guild_id: parent.guildId,
+				type: 0,
+			},
 		});
 		await dispatchMessageCreateBroadcast({
 			gatewayService: this.gatewayService,
 			channel: parent,
 			message: threadCreatedMessage,
 		});
-		const member = await this.channelRepository.threads.getThreadMember(thread.id, params.userId);
-		const response = await this.mapThreadResponse(thread, params.userId, params.requestCache, member);
-		await this.dispatchThreadEvent(thread, 'THREAD_CREATE', {...response, newly_created: true});
 		return response;
 	}
 
@@ -267,14 +289,20 @@ export class ThreadService {
 			auto_archive_duration: params.data.auto_archive_duration ?? metadata.auto_archive_duration,
 			archive_timestamp: wantsArchive || wantsUnarchive ? now : (metadata.archive_timestamp ?? null),
 		};
-		const row = thread.toRow();
 		const previousName = thread.name;
-		if (changesName) row.name = params.data.name ?? thread.name;
+		const patch: {name?: string; rate_limit_per_user?: number; thread_metadata: typeof nextMetadata} = {
+			thread_metadata: nextMetadata,
+		};
+		if (changesName && params.data.name != null) patch.name = params.data.name;
 		if (params.data.rate_limit_per_user !== undefined) {
-			row.rate_limit_per_user = params.data.rate_limit_per_user ?? 0;
+			patch.rate_limit_per_user = params.data.rate_limit_per_user ?? 0;
 		}
+		await this.channelRepository.threads.patchThreadChannel(thread.id, patch);
+		const row = thread.toRow();
+		if (patch.name !== undefined) row.name = patch.name;
+		if (patch.rate_limit_per_user !== undefined) row.rate_limit_per_user = patch.rate_limit_per_user;
 		row.thread_metadata = nextMetadata;
-		const updated = await this.channelRepository.channelData.upsert(row);
+		const updated = new Channel(row);
 		if (wantsArchive || wantsUnarchive) {
 			await this.channelRepository.threads.setThreadArchivedRefs(updated, nextMetadata.archived);
 		}
@@ -336,6 +364,9 @@ export class ThreadService {
 		}
 		const metadata = threadMetadataOf(thread);
 		if (metadata.archived) throw new ThreadArchivedError();
+		if (params.targetId !== params.actorId) {
+			await this.assertUserCanViewThread(thread, params.targetId);
+		}
 		const existing = await this.channelRepository.threads.getThreadMember(thread.id, params.targetId);
 		if (existing) return;
 		const joinTimestamp = new Date();
@@ -345,7 +376,7 @@ export class ThreadService {
 			userId: params.targetId,
 			joinTimestamp,
 		});
-		await this.bumpMemberCount(thread, 1);
+		const memberCount = await this.bumpMemberCount(thread, 1);
 		if (params.withSystemMessage) {
 			const messageId = createMessageID(await this.snowflakeService.generateForChannel(thread.id));
 			const systemMessage = await this.messagePersistenceService.createSystemMessage({
@@ -365,6 +396,7 @@ export class ThreadService {
 		await this.dispatchThreadMembersUpdate(thread, {
 			addedMembers: [{thread_id: thread.id, user_id: params.targetId, join_timestamp: joinTimestamp}],
 			removedMemberIds: [],
+			memberCount,
 		});
 	}
 
@@ -402,7 +434,7 @@ export class ThreadService {
 			guildId: thread.guildId,
 			userId: params.targetId,
 		});
-		await this.bumpMemberCount(thread, -1);
+		const memberCount = await this.bumpMemberCount(thread, -1);
 		const messageId = createMessageID(await this.snowflakeService.generateForChannel(thread.id));
 		const systemMessage = await this.messagePersistenceService.createSystemMessage({
 			messageId,
@@ -420,6 +452,7 @@ export class ThreadService {
 		await this.dispatchThreadMembersUpdate(thread, {
 			addedMembers: [],
 			removedMemberIds: [params.targetId],
+			memberCount,
 		});
 	}
 
@@ -447,6 +480,40 @@ export class ThreadService {
 		const threads = await this.channelRepository.channelData.listChannels(activeIds);
 		threads.sort((a, b) => (a.id < b.id ? -1 : 1));
 		return this.buildThreadListResult(threads, params.userId, params.requestCache, false);
+	}
+
+	/** Guild-scoped active thread listing, filtered by parent-channel visibility. */
+	async listActiveGuildThreads(params: {
+		userId: UserID;
+		guildId: GuildID;
+		requestCache: RequestCache;
+	}): Promise<ThreadListResult> {
+		const member = await this.gatewayService.getGuildMember({guildId: params.guildId, userId: params.userId});
+		if (!member.success || !member.memberData) {
+			throw new MissingAccessError();
+		}
+		const refs = await this.channelRepository.threads.listThreadRefsByGuild(params.guildId);
+		const activeIds = refs.filter((ref) => !ref.archived).map((ref) => ref.thread_id);
+		const threads = await this.channelRepository.channelData.listChannels(activeIds);
+		const viewableParents = new Map<string, boolean>();
+		const visible: Array<Channel> = [];
+		for (const thread of threads) {
+			const parentId = thread.parentId ?? thread.id;
+			const parentKey = parentId.toString();
+			let canView = viewableParents.get(parentKey);
+			if (canView === undefined) {
+				canView = await this.gatewayService.checkPermission({
+					guildId: params.guildId,
+					userId: params.userId,
+					permission: Permissions.VIEW_CHANNEL,
+					channelId: parentId,
+				});
+				viewableParents.set(parentKey, canView);
+			}
+			if (canView) visible.push(thread);
+		}
+		visible.sort((a, b) => (a.id < b.id ? -1 : 1));
+		return this.buildThreadListResult(visible, params.userId, params.requestCache, false);
 	}
 
 	async listArchivedThreads(params: {
@@ -514,9 +581,22 @@ export class ThreadService {
 			throw new InvalidChannelTypeError();
 		}
 		await checkPermission(Permissions.MANAGE_THREADS);
+		await this.channelUtilsService.purgeChannelAttachments(thread);
 		await this.channelRepository.messages.deleteAllChannelMessages(thread.id);
 		await deleteChannelMessageSearchDocuments(thread.id, {context: {source: 'thread_delete'}});
 		await this.channelRepository.threads.deleteThread(thread);
+		const changes = this.guildAuditLogService.computeChanges(ChannelHelpers.serializeChannelForAudit(thread), null);
+		const builder = this.guildAuditLogService
+			.createBuilder(thread.guildId, params.userId)
+			.withAction(AuditLogActionType.CHANNEL_DELETE, thread.id.toString())
+			.withReason(null)
+			.withMetadata({type: thread.type.toString()})
+			.withChanges(changes);
+		try {
+			await builder.commit();
+		} catch (error) {
+			Logger.error({error, threadId: thread.id.toString()}, 'Failed to write thread deletion audit log entry');
+		}
 		await this.dispatchThreadEvent(thread, 'THREAD_DELETE', {
 			id: thread.id.toString(),
 			guild_id: thread.guildId.toString(),
@@ -536,38 +616,53 @@ export class ThreadService {
 	}): Promise<void> {
 		const thread = params.thread;
 		if (!isThreadChannelType(thread.type) || !thread.guildId) return;
+		const guildId = thread.guildId;
 		const metadata = threadMetadataOf(thread);
 		const now = new Date();
+		const unarchived = metadata.archived && !metadata.locked;
+		const nextMetadata = unarchived ? {...metadata, archived: false, archive_timestamp: now} : metadata;
+		// Counts are approximate under concurrency; targeted patches keep racing
+		// sends from clobbering unrelated fields such as name or archive state.
+		await this.channelRepository.threads.patchThreadChannel(thread.id, {
+			message_count: (thread.messageCount ?? 0) + 1,
+			total_message_sent: (thread.totalMessageSent ?? 0) + 1,
+			...(unarchived ? {thread_metadata: nextMetadata} : {}),
+		});
 		const row = thread.toRow();
 		row.message_count = (thread.messageCount ?? 0) + 1;
 		row.total_message_sent = (thread.totalMessageSent ?? 0) + 1;
-		let unarchived = false;
-		if (metadata.archived && !metadata.locked) {
-			row.thread_metadata = {...metadata, archived: false, archive_timestamp: now};
-			unarchived = true;
-		}
-		const updated = await this.channelRepository.channelData.upsert(row);
+		row.thread_metadata = nextMetadata;
+		const updated = new Channel(row);
 		if (unarchived) {
 			await this.channelRepository.threads.setThreadArchivedRefs(updated, false);
 		}
-		await this.scheduleArchiveDue(updated, now, metadata.auto_archive_duration);
+		if (!nextMetadata.archived) {
+			await this.scheduleArchiveDue(updated, now, nextMetadata.auto_archive_duration);
+		}
 		const joiners = [params.senderId, ...params.mentionedUserIds];
 		const added: Array<ThreadMemberRow> = [];
 		for (const userId of joiners) {
 			const existing = await this.channelRepository.threads.getThreadMember(thread.id, userId);
 			if (existing) continue;
+			if (userId !== params.senderId && !(await this.isGuildMember(guildId, userId))) {
+				continue;
+			}
 			const joinTimestamp = new Date();
 			await this.channelRepository.threads.addThreadMember({
 				threadId: thread.id,
-				guildId: thread.guildId,
+				guildId,
 				userId,
 				joinTimestamp,
 			});
 			added.push({thread_id: thread.id, user_id: userId, join_timestamp: joinTimestamp});
 		}
 		if (added.length > 0) {
-			await this.bumpMemberCount(updated, added.length);
-			await this.dispatchThreadMembersUpdate(updated, {addedMembers: added, removedMemberIds: []});
+			const memberCount = await this.bumpMemberCount(updated, added.length);
+			await this.dispatchThreadMembersUpdate(updated, {
+				addedMembers: added,
+				removedMemberIds: [],
+				memberCount,
+			});
 		}
 		if (unarchived) {
 			const response = await this.mapThreadResponse(updated, null, null, null);
@@ -580,12 +675,35 @@ export class ThreadService {
 		const metadata = threadMetadataOf(thread);
 		if (metadata.archived) return;
 		const now = new Date();
+		const nextMetadata = {...metadata, archived: true, archive_timestamp: now};
+		await this.channelRepository.threads.patchThreadChannel(thread.id, {thread_metadata: nextMetadata});
 		const row = thread.toRow();
-		row.thread_metadata = {...metadata, archived: true, archive_timestamp: now};
-		const updated = await this.channelRepository.channelData.upsert(row);
+		row.thread_metadata = nextMetadata;
+		const updated = new Channel(row);
 		await this.channelRepository.threads.setThreadArchivedRefs(updated, true);
 		const response = await this.mapThreadResponse(updated, null, null, null);
 		await this.dispatchThreadEvent(updated, 'THREAD_UPDATE', response);
+	}
+
+	/** Ensures a prospective thread member is a guild member who can view the parent channel. */
+	private async assertUserCanViewThread(thread: Channel, userId: UserID): Promise<void> {
+		if (!thread.guildId) throw new InvalidChannelTypeError();
+		const member = await this.gatewayService.getGuildMember({guildId: thread.guildId, userId});
+		if (!member.success || !member.memberData) {
+			throw new MissingAccessError();
+		}
+		const canView = await this.gatewayService.checkPermission({
+			guildId: thread.guildId,
+			userId,
+			permission: Permissions.VIEW_CHANNEL,
+			channelId: thread.parentId ?? thread.id,
+		});
+		if (!canView) throw new MissingAccessError();
+	}
+
+	private async isGuildMember(guildId: NonNullable<Channel['guildId']>, userId: UserID): Promise<boolean> {
+		const member = await this.gatewayService.getGuildMember({guildId, userId});
+		return Boolean(member.success && member.memberData);
 	}
 
 	private async scheduleArchiveDue(thread: Channel, from: Date, autoArchiveDurationMinutes: number): Promise<void> {
@@ -600,14 +718,12 @@ export class ThreadService {
 		});
 	}
 
-	private async bumpMemberCount(thread: Channel, delta: number): Promise<void> {
+	private async bumpMemberCount(thread: Channel, delta: number): Promise<number> {
 		const current = thread.memberCount ?? 0;
-		if (delta > 0 && current >= THREAD_MEMBER_COUNT_TRACKING_CAP) return;
 		const next = Math.max(0, Math.min(THREAD_MEMBER_COUNT_TRACKING_CAP, current + delta));
-		if (next === current) return;
-		const row = thread.toRow();
-		row.member_count = next;
-		await this.channelRepository.channelData.upsert(row);
+		if (next === current) return current;
+		await this.channelRepository.threads.patchThreadChannel(thread.id, {member_count: next});
+		return next;
 	}
 
 	private async buildThreadListResult(
@@ -636,7 +752,7 @@ export class ThreadService {
 			channel: thread,
 			currentUserId: userId,
 			userCacheService: this.userCacheService,
-			requestCache: requestCache ?? ({} as RequestCache),
+			requestCache: requestCache ?? createRequestCache(),
 		});
 		if (member) {
 			return {...response, member: serializeThreadMember(member)};
@@ -655,13 +771,13 @@ export class ThreadService {
 
 	private async dispatchThreadMembersUpdate(
 		thread: Channel,
-		params: {addedMembers: Array<ThreadMemberRow>; removedMemberIds: Array<UserID>},
+		params: {addedMembers: Array<ThreadMemberRow>; removedMemberIds: Array<UserID>; memberCount: number},
 	): Promise<void> {
 		if (!thread.guildId) return;
 		await this.dispatchThreadEvent(thread, 'THREAD_MEMBERS_UPDATE', {
 			id: thread.id.toString(),
 			guild_id: thread.guildId.toString(),
-			member_count: Math.min((thread.memberCount ?? 0) + params.addedMembers.length, THREAD_MEMBER_COUNT_TRACKING_CAP),
+			member_count: params.memberCount,
 			added_members: params.addedMembers.map(serializeThreadMember),
 			removed_member_ids: params.removedMemberIds.map((id) => id.toString()),
 		});

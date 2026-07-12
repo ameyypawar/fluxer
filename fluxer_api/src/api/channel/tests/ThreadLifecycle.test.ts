@@ -1,14 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import {MessageTypes, Permissions} from '@fluxer/constants/src/ChannelConstants';
-import type {ChannelResponse, ThreadListResponse, ThreadMemberResponse} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
+import type {
+	ChannelResponse,
+	ThreadListResponse,
+	ThreadMemberResponse,
+} from '@fluxer/schema/src/domains/channel/ChannelSchemas';
 import type {MessageResponse} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
 import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
-import type {TestAccount} from '../../auth/tests/AuthTestUtils';
-import {HTTP_STATUS} from '../../test/TestConstants';
+import {createTestAccount, type TestAccount} from '../../auth/tests/AuthTestUtils';
 import {type ApiTestHarness, createApiTestHarness} from '../../test/ApiTestHarness';
+import {HTTP_STATUS} from '../../test/TestConstants';
 import {createBuilder} from '../../test/TestRequestBuilder';
-import {getChannel, getGuild, sendChannelMessage, setupTestGuildWithMembers, updateRole} from './ChannelTestUtils';
+import {
+	createChannel,
+	getChannel,
+	getGuild,
+	sendChannelMessage,
+	setupTestGuildWithMembers,
+	updateRole,
+} from './ChannelTestUtils';
 
 async function createThreadFromMessage(
 	harness: ApiTestHarness,
@@ -24,7 +35,11 @@ async function createThreadFromMessage(
 		.execute();
 }
 
-async function listMessages(harness: ApiTestHarness, token: string, channelId: string): Promise<Array<MessageResponse>> {
+async function listMessages(
+	harness: ApiTestHarness,
+	token: string,
+	channelId: string,
+): Promise<Array<MessageResponse>> {
 	return createBuilder<Array<MessageResponse>>(harness, token).get(`/channels/${channelId}/messages`).execute();
 }
 
@@ -180,11 +195,12 @@ describe('Thread lifecycle', () => {
 			.body({archived: true, locked: true})
 			.execute();
 		await setEveryonePermissions(harness, owner.token, guildId, BASE_MEMBER_PERMISSIONS);
-		await createBuilder<unknown>(harness, members[0].token)
+		const lockedError = await createBuilder<{code: string}>(harness, members[0].token)
 			.patch(`/channels/${thread.id}`)
 			.body({archived: false})
 			.expect(HTTP_STATUS.BAD_REQUEST)
 			.execute();
+		expect(lockedError.code).toBe('THREAD_LOCKED');
 		const unarchived = await createBuilder<ChannelResponse>(harness, owner.token)
 			.patch(`/channels/${thread.id}`)
 			.body({archived: false})
@@ -261,7 +277,12 @@ describe('Thread lifecycle', () => {
 	it('gates thread posting on SEND_MESSAGES_IN_THREADS instead of SEND_MESSAGES', async () => {
 		const {owner, members, guildId, thread, channelId} = await setupThread();
 		// Without SEND_MESSAGES_IN_THREADS the member can post to the parent but not the thread.
-		await setEveryonePermissions(harness, owner.token, guildId, BASE_MEMBER_PERMISSIONS & ~Permissions.SEND_MESSAGES_IN_THREADS);
+		await setEveryonePermissions(
+			harness,
+			owner.token,
+			guildId,
+			BASE_MEMBER_PERMISSIONS & ~Permissions.SEND_MESSAGES_IN_THREADS,
+		);
 		await sendChannelMessage(harness, members[0].token, channelId, 'parent still works');
 		await createBuilder<unknown>(harness, members[0].token)
 			.post(`/channels/${thread.id}/messages`)
@@ -301,6 +322,51 @@ describe('Thread lifecycle', () => {
 			.get(`/channels/${channelId}/threads/search?q=feature&archived=true`)
 			.execute();
 		expect(search.threads.map((entry) => entry.id)).toEqual([second.id]);
+	});
+
+	it('rejects adding a user who is not a guild member', async () => {
+		const {owner, thread} = await setupThread();
+		const outsider = await createTestAccount(harness);
+		await createBuilder<unknown>(harness, owner.token)
+			.put(`/channels/${thread.id}/thread-members/${outsider.userId}`)
+			.body(null)
+			.expect(HTTP_STATUS.FORBIDDEN)
+			.execute();
+		const threadMembers = await createBuilder<Array<ThreadMemberResponse>>(harness, owner.token)
+			.get(`/channels/${thread.id}/thread-members`)
+			.execute();
+		expect(threadMembers.map((member) => member.user_id)).not.toContain(outsider.userId);
+	});
+
+	it('lists active threads guild-wide for the caller', async () => {
+		const {owner, members, guildId, thread} = await setupThread();
+		const mine = await createBuilder<ThreadListResponse>(harness, owner.token)
+			.get(`/guilds/${guildId}/threads/active`)
+			.execute();
+		expect(mine.threads.map((entry) => entry.id)).toContain(thread.id);
+		const theirs = await createBuilder<ThreadListResponse>(harness, members[0].token)
+			.get(`/guilds/${guildId}/threads/active`)
+			.execute();
+		expect(theirs.threads.map((entry) => entry.id)).toContain(thread.id);
+	});
+
+	it('cascades thread deletion when the parent channel is deleted', async () => {
+		const {owner, guild} = await setupTestGuildWithMembers(harness, 0);
+		const parent = await createChannel(harness, owner.token, guild.id, 'thread-parent');
+		await sendChannelMessage(harness, owner.token, parent.id, 'seed');
+		const thread = await createBuilder<ChannelResponse>(harness, owner.token)
+			.post(`/channels/${parent.id}/threads`)
+			.body({name: 'Doomed thread'})
+			.expect(HTTP_STATUS.CREATED)
+			.execute();
+		await createBuilder<unknown>(harness, owner.token)
+			.delete(`/channels/${parent.id}`)
+			.expect(HTTP_STATUS.NO_CONTENT)
+			.execute();
+		await createBuilder<unknown>(harness, owner.token)
+			.get(`/channels/${thread.id}`)
+			.expect(HTTP_STATUS.NOT_FOUND)
+			.execute();
 	});
 
 	it('deletes a thread with MANAGE_THREADS and cleans up listings', async () => {

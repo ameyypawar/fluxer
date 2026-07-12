@@ -14,9 +14,10 @@ import {
 	ChannelIdMessageIdParam,
 	ChannelIdParam,
 	ChannelIdUserIdParam,
+	GuildIdParam,
 } from '@fluxer/schema/src/domains/common/CommonParamSchemas';
 import {z} from 'zod';
-import {createChannelID, createMessageID, createUserID} from '../../BrandedTypes';
+import {createChannelID, createGuildID, createMessageID, createUserID} from '../../BrandedTypes';
 import {LoginRequired} from '../../middleware/AuthMiddleware';
 import {RateLimitMiddleware} from '../../middleware/RateLimitMiddleware';
 import {OpenAPI} from '../../middleware/ResponseTypeMiddleware';
@@ -92,6 +93,30 @@ export function ThreadController(app: HonoApp) {
 			const threadService = ctx.get('channelService').threads;
 			const response = await threadService.createThread({userId, channelId, data, requestCache});
 			return ctx.json(response, 201);
+		},
+	);
+	app.get(
+		'/guilds/:guild_id/threads/active',
+		RateLimitMiddleware(RateLimitConfigs.CHANNEL_GET),
+		LoginRequired,
+		Validator('param', GuildIdParam),
+		OpenAPI({
+			operationId: 'list_active_guild_threads',
+			summary: 'List active guild threads',
+			description:
+				'Returns all active (non-archived) threads in the guild that the calling user can view, along with the thread member objects of the calling user for threads they have joined.',
+			responseSchema: ThreadListResponse,
+			statusCode: 200,
+			security: ['botToken', 'bearerToken', 'sessionToken'],
+			tags: 'Threads',
+		}),
+		async (ctx) => {
+			const userId = ctx.get('user').id;
+			const guildId = createGuildID(ctx.req.valid('param').guild_id);
+			const requestCache = ctx.get('requestCache');
+			const threadService = ctx.get('channelService').threads;
+			const result = await threadService.listActiveGuildThreads({userId, guildId, requestCache});
+			return ctx.json(toThreadListResponse(result));
 		},
 	);
 	app.get(

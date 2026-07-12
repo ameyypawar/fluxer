@@ -38,10 +38,13 @@ async function threadAutoArchiveSweepCore(): Promise<SweepResult> {
 				continue;
 			}
 			// Due rows are hints; re-derive the real deadline from the latest activity
-			// so hints superseded by newer messages archive nothing prematurely.
-			const lastActivityAt = thread.lastMessageId
+			// so hints superseded by newer messages archive nothing prematurely. The
+			// archive timestamp records the last unarchive, which also resets the timer.
+			const lastMessageAt = thread.lastMessageId
 				? snowflakeToDate(BigInt(thread.lastMessageId))
 				: snowflakeToDate(BigInt(thread.id));
+			const lastUnarchivedAt = metadata.archive_timestamp?.getTime() ?? 0;
+			const lastActivityAt = new Date(Math.max(lastMessageAt.getTime(), lastUnarchivedAt));
 			const autoArchiveDuration = metadata.auto_archive_duration ?? THREAD_AUTO_ARCHIVE_DURATION_DEFAULT;
 			const dueAt = new Date(lastActivityAt.getTime() + autoArchiveDuration * MINUTE_MS);
 			if (dueAt.getTime() > now.getTime()) {

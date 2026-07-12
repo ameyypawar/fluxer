@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type {ChannelID, GuildID, UserID} from '../../BrandedTypes';
-import {BatchBuilder, fetchMany, fetchOne, upsertOne} from '../../database/CassandraQueryExecution';
+import {BatchBuilder, deleteOneOrMany, fetchMany, fetchOne, upsertOne} from '../../database/CassandraQueryExecution';
 import {Db} from '../../database/CassandraTypes';
 import type {
 	ChannelRow,
@@ -19,7 +19,7 @@ import {
 	ThreadsByGuild,
 	ThreadsByParent,
 } from '../../Tables';
-import {IThreadRepository} from './IThreadRepository';
+import {IThreadRepository, type ThreadChannelPatch} from './IThreadRepository';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ARCHIVE_DUE_ROW_TTL_SECONDS = 45 * 24 * 60 * 60;
@@ -41,9 +41,6 @@ const FETCH_THREAD_MEMBER = ThreadMembers.select({
 });
 const FETCH_THREAD_MEMBERS = ThreadMembers.select({
 	where: ThreadMembers.where.eq('thread_id'),
-});
-const FETCH_JOINED_THREADS = ThreadMembersByUser.select({
-	where: [ThreadMembersByUser.where.eq('user_id'), ThreadMembersByUser.where.eq('guild_id')],
 });
 const FETCH_ARCHIVE_DUE_BY_BUCKET = ThreadArchiveDue.select({
 	where: [ThreadArchiveDue.where.eq('due_bucket'), ThreadArchiveDue.where.lte('archive_due_at')],
@@ -74,6 +71,23 @@ export class ThreadRepository extends IThreadRepository {
 		);
 		await batch.execute();
 		return new Channel(row);
+	}
+
+	/**
+	 * Applies a targeted patch to a thread's channels row. Thread mutations go
+	 * through column patches instead of full-row upserts so concurrent sends,
+	 * joins, and archive toggles cannot clobber each other's fields.
+	 */
+	async patchThreadChannel(threadId: ChannelID, patch: ThreadChannelPatch): Promise<void> {
+		const dbPatch: Record<string, ReturnType<typeof Db.set>> = {};
+		if (patch.name !== undefined) dbPatch.name = Db.set(patch.name);
+		if (patch.rate_limit_per_user !== undefined) dbPatch.rate_limit_per_user = Db.set(patch.rate_limit_per_user);
+		if (patch.thread_metadata !== undefined) dbPatch.thread_metadata = Db.set(patch.thread_metadata);
+		if (patch.message_count !== undefined) dbPatch.message_count = Db.set(patch.message_count);
+		if (patch.total_message_sent !== undefined) dbPatch.total_message_sent = Db.set(patch.total_message_sent);
+		if (patch.member_count !== undefined) dbPatch.member_count = Db.set(patch.member_count);
+		if (Object.keys(dbPatch).length === 0) return;
+		await upsertOne(Channels.patchByPk({channel_id: threadId, soft_deleted: false}, dbPatch));
 	}
 
 	async listThreadRefsByParent(parentId: ChannelID): Promise<Array<ThreadsByParentRow>> {
@@ -142,13 +156,6 @@ export class ThreadRepository extends IThreadRepository {
 		return fetchMany<ThreadMemberRow>(FETCH_THREAD_MEMBERS.bind({thread_id: threadId}));
 	}
 
-	async listJoinedThreadIds(userId: UserID, guildId: GuildID): Promise<Array<ChannelID>> {
-		const rows = await fetchMany<{thread_id: ChannelID}>(
-			FETCH_JOINED_THREADS.bind({user_id: userId, guild_id: guildId}),
-		);
-		return rows.map((row) => row.thread_id);
-	}
-
 	async deleteThread(thread: Channel): Promise<void> {
 		const members = await this.listThreadMembers(thread.id);
 		const batch = new BatchBuilder();
@@ -165,7 +172,7 @@ export class ThreadRepository extends IThreadRepository {
 			const guildId = thread.guildId;
 			await Promise.all(
 				members.map((member) =>
-					upsertOne(
+					deleteOneOrMany(
 						ThreadMembersByUser.deleteByPk({
 							user_id: member.user_id,
 							guild_id: guildId,
@@ -190,7 +197,7 @@ export class ThreadRepository extends IThreadRepository {
 	async deleteArchiveDueRow(
 		row: Pick<ThreadArchiveDueRow, 'due_bucket' | 'archive_due_at' | 'thread_id'>,
 	): Promise<void> {
-		await upsertOne(
+		await deleteOneOrMany(
 			ThreadArchiveDue.deleteByPk({
 				due_bucket: row.due_bucket,
 				archive_due_at: row.archive_due_at,

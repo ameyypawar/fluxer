@@ -5,13 +5,25 @@ import type {
 	ChannelRow,
 	ThreadArchiveDueRow,
 	ThreadMemberRow,
+	ThreadMetadata,
 	ThreadsByGuildRow,
 	ThreadsByParentRow,
 } from '../../database/types/ChannelTypes';
 import type {Channel} from '../../models/Channel';
 
+export interface ThreadChannelPatch {
+	name?: string;
+	rate_limit_per_user?: number;
+	thread_metadata?: ThreadMetadata;
+	message_count?: number;
+	total_message_sent?: number;
+	member_count?: number;
+}
+
 export abstract class IThreadRepository {
 	abstract createThread(row: ChannelRow): Promise<Channel>;
+
+	abstract patchThreadChannel(threadId: ChannelID, patch: ThreadChannelPatch): Promise<void>;
 
 	abstract listThreadRefsByParent(parentId: ChannelID): Promise<Array<ThreadsByParentRow>>;
 
@@ -31,8 +43,6 @@ export abstract class IThreadRepository {
 	abstract getThreadMember(threadId: ChannelID, userId: UserID): Promise<ThreadMemberRow | null>;
 
 	abstract listThreadMembers(threadId: ChannelID): Promise<Array<ThreadMemberRow>>;
-
-	abstract listJoinedThreadIds(userId: UserID, guildId: GuildID): Promise<Array<ChannelID>>;
 
 	abstract deleteThread(thread: Channel): Promise<void>;
 

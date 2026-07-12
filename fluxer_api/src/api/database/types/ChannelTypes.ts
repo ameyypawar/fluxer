@@ -53,10 +53,10 @@ export interface ChannelRow {
 	soft_deleted: boolean;
 	indexed_at: Nullish<Date>;
 	version: number;
-	thread_metadata?: Nullish<ThreadMetadata>;
-	message_count?: Nullish<number>;
-	total_message_sent?: Nullish<number>;
-	member_count?: Nullish<number>;
+	thread_metadata: Nullish<ThreadMetadata>;
+	message_count: Nullish<number>;
+	total_message_sent: Nullish<number>;
+	member_count: Nullish<number>;
 }
 
 export interface InviteRow {

@@ -860,6 +860,14 @@ export class GuildOperationsService {
 		await Promise.all(webhooks.map((webhook) => this.webhookRepository.delete(webhook.id)));
 		const channels = await this.channelRepository.listGuildChannels(guildId);
 		await Promise.all(channels.map((channel) => this.channelRepository.deleteAllChannelMessages(channel.id)));
+		const threadRefs = await this.channelRepository.threads.listThreadRefsByGuild(guildId);
+		for (const threadRef of threadRefs) {
+			const thread = await this.channelRepository.channelData.findUnique(threadRef.thread_id);
+			if (!thread) continue;
+			await this.channelRepository.deleteAllChannelMessages(thread.id);
+			await this.channelService.attachments.purgeChannelAttachments(thread);
+			await this.channelRepository.threads.deleteThread(thread);
+		}
 		await deleteGuildMessageSearchDocuments(guildId, {context: {source: 'guild_delete'}});
 		await Promise.all(channels.map((channel) => this.channelService.attachments.purgeChannelAttachments(channel)));
 		const discoveryRow = await this.discoveryRepository.findByGuildId(guildId);

@@ -134,6 +134,8 @@ export class ChannelService {
 			gatewayService,
 			snowflakeService,
 			messagePersistenceService,
+			this.channelData.utils,
+			guildAuditLogService,
 		);
 		this.messages = new MessageService(
 			channelRepository,
