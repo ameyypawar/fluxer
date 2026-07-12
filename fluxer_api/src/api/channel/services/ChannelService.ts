@@ -154,6 +154,7 @@ export class ChannelService {
 			messagePersistenceService,
 			limitConfigService,
 			directMessageSpamMitigationService,
+			this.threads,
 		);
 		this.interactions = new MessageInteractionService(
 			channelRepository,
