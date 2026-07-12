@@ -185,6 +185,16 @@ export const ChannelResponse = z.object({
 
 export type ChannelResponse = z.infer<typeof ChannelResponse>;
 
+export const ThreadListResponse = z.object({
+	threads: z.array(ChannelResponse).describe('The matching thread channels'),
+	members: z
+		.array(ThreadMemberResponse)
+		.describe("The calling user's thread member objects for the threads they have joined"),
+	has_more: z.boolean().describe('Whether more threads are available in subsequent pages'),
+});
+
+export type ThreadListResponse = z.infer<typeof ThreadListResponse>;
+
 export const ChannelNicknameOverrides = z
 	.record(
 		z.string().describe('User ID'),
