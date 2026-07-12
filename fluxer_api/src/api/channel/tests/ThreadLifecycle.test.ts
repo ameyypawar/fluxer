@@ -5,7 +5,7 @@ import type {ChannelResponse, ThreadListResponse, ThreadMemberResponse} from '@f
 import type {MessageResponse} from '@fluxer/schema/src/domains/message/MessageResponseSchemas';
 import {afterAll, beforeAll, beforeEach, describe, expect, it} from 'vitest';
 import type {TestAccount} from '../../auth/tests/AuthTestUtils';
-import {HTTP_STATUS} from '../../constants/HttpStatus';
+import {HTTP_STATUS} from '../../test/TestConstants';
 import {type ApiTestHarness, createApiTestHarness} from '../../test/ApiTestHarness';
 import {createBuilder} from '../../test/TestRequestBuilder';
 import {getChannel, getGuild, sendChannelMessage, setupTestGuildWithMembers, updateRole} from './ChannelTestUtils';
@@ -20,6 +20,7 @@ async function createThreadFromMessage(
 	return createBuilder<ChannelResponse>(harness, token)
 		.post(`/channels/${channelId}/messages/${messageId}/threads`)
 		.body({name})
+		.expect(HTTP_STATUS.CREATED)
 		.execute();
 }
 
@@ -109,6 +110,7 @@ describe('Thread lifecycle', () => {
 		const thread = await createBuilder<ChannelResponse>(harness, owner.token)
 			.post(`/channels/${systemChannel.id}/threads`)
 			.body({name: 'Standalone', auto_archive_duration: 1440})
+			.expect(HTTP_STATUS.CREATED)
 			.execute();
 		expect(thread.type).toBe(11);
 		expect(thread.parent_id).toBe(systemChannel.id);
@@ -137,18 +139,14 @@ describe('Thread lifecycle', () => {
 	});
 
 	it('prevents non-creators without MANAGE_THREADS from renaming', async () => {
-		const {members, guildId, thread} = await setupThread();
-		await setEveryonePermissions(harness, (await setupThreadOwnerToken()) ?? '', guildId, BASE_MEMBER_PERMISSIONS);
+		const {owner, members, guildId, thread} = await setupThread();
+		await setEveryonePermissions(harness, owner.token, guildId, BASE_MEMBER_PERMISSIONS);
 		await createBuilder<unknown>(harness, members[0].token)
 			.patch(`/channels/${thread.id}`)
 			.body({name: 'Hijacked'})
 			.expect(HTTP_STATUS.FORBIDDEN)
 			.execute();
 	});
-
-	async function setupThreadOwnerToken(): Promise<string | null> {
-		return null;
-	}
 
 	it('archives and unarchives a thread', async () => {
 		const {owner, members, thread} = await setupThread();
@@ -284,6 +282,7 @@ describe('Thread lifecycle', () => {
 		const second = await createBuilder<ChannelResponse>(harness, owner.token)
 			.post(`/channels/${channelId}/threads`)
 			.body({name: 'Feature talk'})
+			.expect(HTTP_STATUS.CREATED)
 			.execute();
 		await createBuilder<ChannelResponse>(harness, owner.token)
 			.patch(`/channels/${second.id}`)
