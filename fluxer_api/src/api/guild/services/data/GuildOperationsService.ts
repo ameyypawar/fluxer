@@ -940,7 +940,7 @@ export class GuildOperationsService {
 				guild_id: guildId,
 				role_id: guildIdToRoleId(guildId),
 				name: '@everyone',
-				permissions: DEFAULT_PERMISSIONS,
+				permissions: DEFAULT_PERMISSIONS | Permissions.CREATE_PUBLIC_THREADS | Permissions.SEND_MESSAGES_IN_THREADS,
 				position: 0,
 				hoist_position: null,
 				color: 0,
@@ -1017,7 +1017,7 @@ export class GuildOperationsService {
 		}
 		const everyonePermissions =
 			this.parseTemplatePermissionBitfield(everyoneRole?.permissions_new ?? everyoneRole?.permissions) ||
-			DEFAULT_PERMISSIONS;
+			DEFAULT_PERMISSIONS | Permissions.CREATE_PUBLIC_THREADS | Permissions.SEND_MESSAGES_IN_THREADS;
 		batch.addPrepared(
 			GuildRoles.insert({
 				guild_id: guildId,
