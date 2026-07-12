@@ -37,8 +37,6 @@ export const ThreadAutoArchiveDurations = {
 	SEVEN_DAYS: 10080,
 } as const;
 
-export type ThreadAutoArchiveDuration = ValueOf<typeof ThreadAutoArchiveDurations>;
-
 export const THREAD_AUTO_ARCHIVE_DURATION_DEFAULT = ThreadAutoArchiveDurations.SEVEN_DAYS;
 export const AUTOMATIC_VOICE_REGION_ID = 'automatic';
 export const ChannelOverwriteTypes = {

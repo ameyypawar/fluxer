@@ -87,7 +87,7 @@ export const VoicePresenceHeartbeatEndResponse = z.object({
 
 export type VoicePresenceHeartbeatEndResponse = z.infer<typeof VoicePresenceHeartbeatEndResponse>;
 
-export const ThreadMetadataResponse = z.object({
+const ThreadMetadataResponse = z.object({
 	archived: z.boolean().describe('Whether the thread is archived'),
 	locked: z
 		.boolean()
@@ -100,8 +100,6 @@ export const ThreadMetadataResponse = z.object({
 		.nullish()
 		.describe('ISO 8601 timestamp of when the thread archive status last changed'),
 });
-
-export type ThreadMetadataResponse = z.infer<typeof ThreadMetadataResponse>;
 
 export const ThreadMemberResponse = z.object({
 	id: SnowflakeStringType.describe('The ID of the thread'),
